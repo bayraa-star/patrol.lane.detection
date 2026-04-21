@@ -55,8 +55,9 @@ def connect_with_retries(conn, retries, retry_delay):
                 conn.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             if conn.active_decode_mode == "hardware":
                 logging.info(
-                    "Connected RTSP stream using Intel hardware decoder '%s' on %s",
+                    "Connected RTSP stream using Intel hardware decoder '%s' with driver '%s' on %s",
                     conn.active_decoder,
+                    conn.active_libva_driver,
                     conn.active_drm_device,
                 )
             else:
@@ -100,6 +101,11 @@ def main():
     logging.info("Starting lane detection service")
     logging.info("Lane classes: %s", ", ".join(config.CLASS_NAMES))
     logging.info("OpenCV has GStreamer support: %s", "GStreamer:                   YES" in cv2.getBuildInformation())
+    logging.info(
+        "Intel decode fallback order: drivers=%s, cpu_fallback=%s",
+        ",".join(config.LIBVA_DRIVER_CANDIDATES),
+        config.ALLOW_CPU_FALLBACK,
+    )
     log_rtsp_details(config.RTSP_URL)
 
     flask_thread = threading.Thread(target=run_flask, args=(config,), daemon=True)
@@ -158,7 +164,7 @@ def main():
                 rtsp_conn.is_connected = False
 
             if not rtsp_conn.is_connected:
-                logging.info("Attempting to reconnect RTSP stream with Intel hardware decode")
+                logging.info("Attempting to reconnect RTSP stream with Intel iHD/i965 decode and CPU fallback")
                 connection_stats["reconnections"] += 1
                 connection_stats["uptime"] = time.time()
                 if not rtsp_conn.reconnect():

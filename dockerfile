@@ -79,7 +79,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       gstreamer1.0-tools gstreamer1.0-libav \
       gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
       gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
-      gstreamer1.0-vaapi vainfo intel-media-va-driver \
+      gstreamer1.0-vaapi vainfo intel-media-va-driver i965-va-driver \
     && rm -rf /var/lib/apt/lists/*
 
 # Bring in the GStreamer-enabled OpenCV (including cv2 under /usr/local)
@@ -122,8 +122,7 @@ PY
 # Optional debugging
 ENV OPENCV_LOG_LEVEL=DEBUG \
     GST_DEBUG=2 \
-    GST_VAAPI_DRM_DEVICE=/dev/dri/renderD128 \
-    LIBVA_DRIVER_NAME=iHD
+    LIBVA_DRIVER_CANDIDATES=iHD,i965
 
 WORKDIR /app
 COPY . /app
