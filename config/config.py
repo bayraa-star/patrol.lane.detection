@@ -197,7 +197,7 @@ class Config:
     MODEL_PATH: str = os.getenv("MODEL_PATH", "./models/lane/lane_detector.pt")
     MODEL_CONFIG_PATH: str = os.getenv("MODEL_CONFIG_PATH", "./models/lane/configs.yaml")
     MODEL_DEVICE: str = os.getenv("MODEL_DEVICE", "cpu")
-    MODEL_IMAGE_SIZE: int = int(os.getenv("MODEL_IMAGE_SIZE", "640"))
+    MODEL_IMAGE_SIZE: int = int(os.getenv("MODEL_IMAGE_SIZE", "1280"))
     CONFIDENCE_THRESHOLD: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.05"))
     NMS_THRESHOLD: float = float(os.getenv("NMS_THRESHOLD", "0.45"))
     MAX_DETECTIONS: int = int(os.getenv("MAX_DETECTIONS", "100"))
