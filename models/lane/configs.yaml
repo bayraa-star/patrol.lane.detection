@@ -2,16 +2,29 @@ names:
 - center
 - curve
 - dashed
+- fence
 - patrol
 - solid
-nc: 5
+nc: 6
+roboflow:
+  license: Private
+  project: old_lane_detection
+  url: https://app.roboflow.com/training-pfqzf/old_lane_detection/3
+  version: 3
+  workspace: training-pfqzf
+test: /opt/train_line_detection/old_lane_detection-3/test/images
+train: /opt/train_line_detection/old_lane_detection-3/train/images
+val: /opt/train_line_detection/old_lane_detection-3/valid/images
+path: /opt/train_line_detection/old_lane_detection-3
 colors:
 - [255, 0, 0]
 - [0, 255, 0]
 - [0, 0, 255]
+- [255, 128, 0]
 - [255, 255, 0]
 - [255, 0, 255]
 annotation_types:
+- polygon
 - polygon
 - polygon
 - polygon

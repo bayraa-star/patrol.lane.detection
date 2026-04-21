@@ -216,6 +216,8 @@ def main():
                     line_thickness=config.BOX_THICKNESS,
                     text_scale=config.TEXT_SCALE,
                     text_thickness=config.TEXT_THICKNESS,
+                    lane_guide_coverage_ratio=config.LANE_GUIDE_COVERAGE_RATIO,
+                    lane_guide_fill_alpha=config.LANE_GUIDE_FILL_ALPHA,
                 )
 
             enqueue_frame(processed_frame)

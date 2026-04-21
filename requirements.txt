@@ -5,3 +5,5 @@ flask-cors
 torch
 torchvision
 ultralytics
+onnx
+openvino

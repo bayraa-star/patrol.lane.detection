@@ -1,0 +1,16 @@
+sudo docker build -t bayraa/lane_detector:latest .
+
+sudo docker run --rm -it \
+  --name lane-detection-test \
+  --network host \
+  --device /dev/dri/card1 \
+  --device /dev/dri/renderD128 \
+  -e STREAM_PORT=8016 \
+  -e RTSP_URL='rtsp://localhost:8554/speed2' \
+  -e INTEL_DRM_DEVICE=/dev/dri/renderD128 \
+  -e LIBVA_DRIVER_CANDIDATES=iHD,i965 \
+  -e PREFER_INTEL_HW_DECODE=true \
+  -e ALLOW_CPU_FALLBACK=true \
+  -e PREFER_FFMPEG_CPU_FALLBACK=true \
+  -e VIDEO_FEED_JPEG_QUALITY=90 \
+  bayraa/lane_detector:latest

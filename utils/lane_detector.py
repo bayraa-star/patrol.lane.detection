@@ -8,7 +8,6 @@ from queue import Empty, Queue
 
 import cv2
 import numpy as np
-from ultralytics import YOLO
 
 
 class FrameBuffer:
@@ -65,6 +64,178 @@ def draw_roi(image, roi_coords, color, thickness):
     )
 
 
+def _get_detection_center(detection):
+    x1, y1, x2, y2 = detection["bbox"]
+    return (x1 + x2) / 2.0, (y1 + y2) / 2.0
+
+
+def _get_best_detection_by_class(detections, class_names, target_class_name):
+    target_class_ids = {
+        class_id
+        for class_id, class_name in enumerate(class_names)
+        if class_name == target_class_name
+    }
+    if not target_class_ids:
+        return None
+
+    matching_detections = [
+        detection
+        for detection in detections
+        if detection.get("class_id") in target_class_ids
+    ]
+    if not matching_detections:
+        return None
+
+    return max(matching_detections, key=lambda detection: detection.get("confidence", 0.0))
+
+
+def _get_lane_line_points(detection_bbox, patrol_center_x):
+    x1, y1, x2, y2 = detection_bbox
+    detection_center_x = (x1 + x2) / 2.0
+
+    if detection_center_x < patrol_center_x:
+        return (x1, y2), (x2, y1)
+    return (x2, y2), (x1, y1)
+
+
+def _extend_line_to_frame_coverage(image_shape, start_point, end_point, coverage_ratio):
+    height, width = image_shape[:2]
+    dx = float(end_point[0] - start_point[0])
+    dy = float(end_point[1] - start_point[1])
+    current_length = float(np.hypot(dx, dy))
+    if current_length <= 1e-6:
+        return start_point, end_point
+
+    target_length = coverage_ratio * float(np.hypot(width, height))
+    if target_length <= current_length:
+        return start_point, end_point
+
+    scale = target_length / current_length
+    extended_end_point = (
+        int(round(start_point[0] + dx * scale)),
+        int(round(start_point[1] + dy * scale)),
+    )
+
+    clipped, clipped_start, clipped_end = cv2.clipLine(
+        (0, 0, width, height),
+        start_point,
+        extended_end_point,
+    )
+    if not clipped:
+        return start_point, end_point
+
+    if 0 <= start_point[0] < width and 0 <= start_point[1] < height:
+        clipped_start = start_point
+
+    return clipped_start, clipped_end
+
+
+def _get_nearest_lane_detections(detections, class_names, patrol_center_x):
+    nearest_by_side = {"left": None, "right": None}
+    nearest_distance_by_side = {"left": float("inf"), "right": float("inf")}
+
+    for detection in detections:
+        class_id = detection.get("class_id", -1)
+        class_name = class_names[class_id] if 0 <= class_id < len(class_names) else f"class_{class_id}"
+        if class_name == "patrol":
+            continue
+
+        detection_center_x, _ = _get_detection_center(detection)
+        if detection_center_x < patrol_center_x:
+            side = "left"
+        elif detection_center_x > patrol_center_x:
+            side = "right"
+        else:
+            continue
+
+        distance = abs(detection_center_x - patrol_center_x)
+        current_detection = nearest_by_side[side]
+        current_distance = nearest_distance_by_side[side]
+
+        if current_detection is None or distance < current_distance:
+            nearest_by_side[side] = detection
+            nearest_distance_by_side[side] = distance
+            continue
+
+        if distance == current_distance and detection.get("confidence", 0.0) > current_detection.get("confidence", 0.0):
+            nearest_by_side[side] = detection
+            nearest_distance_by_side[side] = distance
+
+    return nearest_by_side
+
+
+def _get_lane_guide_segment(image_shape, detection_bbox, patrol_center_x, coverage_ratio):
+    start_point, end_point = _get_lane_line_points(detection_bbox, patrol_center_x)
+    return _extend_line_to_frame_coverage(
+        image_shape,
+        start_point,
+        end_point,
+        coverage_ratio,
+    )
+
+
+def _draw_lane_fill(image, left_segment, right_segment, fill_color=(0, 255, 0), fill_alpha=0.20):
+    if left_segment is None or right_segment is None:
+        return
+
+    overlay = image.copy()
+    polygon = np.array(
+        [
+            left_segment[0],
+            left_segment[1],
+            right_segment[1],
+            right_segment[0],
+        ],
+        dtype=np.int32,
+    )
+    cv2.fillPoly(overlay, [polygon], fill_color)
+    cv2.addWeighted(overlay, fill_alpha, image, 1.0 - fill_alpha, 0.0, image)
+
+
+def draw_lane_guides(image, detections, class_names, class_colors, line_thickness, coverage_ratio, fill_alpha):
+    patrol_detection = _get_best_detection_by_class(detections, class_names, "patrol")
+    if patrol_detection is None:
+        return
+
+    patrol_center_x, _ = _get_detection_center(patrol_detection)
+    nearest_detections = _get_nearest_lane_detections(detections, class_names, patrol_center_x)
+    guide_segments = {}
+
+    for side, lane_detection in nearest_detections.items():
+        if lane_detection is None:
+            continue
+
+        guide_segments[side] = _get_lane_guide_segment(
+            image.shape,
+            lane_detection["bbox"],
+            patrol_center_x,
+            coverage_ratio,
+        )
+
+    _draw_lane_fill(
+        image,
+        guide_segments.get("left"),
+        guide_segments.get("right"),
+        fill_alpha=fill_alpha,
+    )
+
+    for side, lane_detection in nearest_detections.items():
+        if lane_detection is None:
+            continue
+
+        start_point, end_point = guide_segments[side]
+        class_id = lane_detection["class_id"]
+        color = class_colors[class_id % len(class_colors)] if class_colors else (0, 255, 0)
+        cv2.line(
+            image,
+            start_point,
+            end_point,
+            color,
+            max(2, line_thickness + 1),
+            cv2.LINE_AA,
+        )
+
+
 def draw_detections(
     image,
     detections,
@@ -74,6 +245,8 @@ def draw_detections(
     line_thickness=2,
     text_scale=0.6,
     text_thickness=2,
+    lane_guide_coverage_ratio=0.70,
+    lane_guide_fill_alpha=0.20,
 ):
     for detection in detections:
         x1, y1, x2, y2 = detection["bbox"]
@@ -121,6 +294,16 @@ def draw_detections(
             text_thickness,
             cv2.LINE_AA,
         )
+
+    draw_lane_guides(
+        image,
+        detections,
+        class_names,
+        class_colors,
+        line_thickness,
+        lane_guide_coverage_ratio,
+        lane_guide_fill_alpha,
+    )
 
 
 class RTSPConnection:
@@ -395,11 +578,31 @@ class RTSPConnection:
         self.is_connected = False
 
 
-class LaneDetector:
+class UltralyticsLaneDetector:
     def __init__(self, config):
+        from ultralytics import YOLO
+
         self.config = config
         self.model = YOLO(config.MODEL_PATH)
         self.model_task = getattr(self.model, "task", None) or getattr(self.model.model, "task", None) or "detect"
+        raw_model_names = getattr(self.model, "names", None) or getattr(self.model.model, "names", None) or {}
+        if isinstance(raw_model_names, dict):
+            self.model_class_names = [str(raw_model_names[index]) for index in sorted(raw_model_names)]
+        elif isinstance(raw_model_names, list):
+            self.model_class_names = [str(name) for name in raw_model_names]
+        else:
+            self.model_class_names = []
+
+        if self.model_class_names:
+            if self.model_class_names == config.CLASS_NAMES:
+                logging.info("Model class names match configs.yaml: %s", ", ".join(self.model_class_names))
+            else:
+                logging.warning(
+                    "Model/config class name mismatch. Model=%s Config=%s",
+                    ", ".join(self.model_class_names),
+                    ", ".join(config.CLASS_NAMES),
+                )
+
         polygon_classes = [
             class_name
             for class_name, annotation_type in zip(config.CLASS_NAMES, config.CLASS_ANNOTATION_TYPES)
@@ -485,6 +688,171 @@ class LaneDetector:
             )
 
         return detections
+
+
+class OpenVINOLaneDetector:
+    def __init__(self, config):
+        import openvino as ov
+        import torch
+        from ultralytics.utils.nms import non_max_suppression
+        from ultralytics.utils.ops import scale_boxes
+
+        self.config = config
+        self.ov = ov
+        self.torch = torch
+        self.non_max_suppression = non_max_suppression
+        self.scale_boxes = scale_boxes
+        self.model_task = "detect"
+        self.model_class_names = list(config.CLASS_NAMES)
+
+        self.core = ov.Core()
+        self.device_name = self._normalize_device(config.MODEL_DEVICE)
+        self.model = self.core.read_model(config.MODEL_PATH)
+        self.compiled_model = self.core.compile_model(self.model, self.device_name)
+        self.input_layer = self.compiled_model.input(0)
+        self.output_layer = self.compiled_model.output(0)
+        self.input_shape = tuple(int(dimension) for dimension in self.input_layer.shape)
+        if len(self.input_shape) != 4:
+            raise ValueError(f"Expected OpenVINO model input shape [N,C,H,W], got {self.input_shape}")
+        self.input_height = self.input_shape[2]
+        self.input_width = self.input_shape[3]
+
+        logging.info(
+            "Loaded OpenVINO lane detector from %s on device %s with input shape %s",
+            config.MODEL_PATH,
+            self.device_name,
+            self.input_shape,
+        )
+
+    @staticmethod
+    def _normalize_device(device_name):
+        if not device_name:
+            return "CPU"
+        normalized = str(device_name).strip()
+        return "CPU" if normalized.lower() == "cpu" else normalized
+
+    def _letterbox(self, image):
+        image_height, image_width = image.shape[:2]
+        gain = min(self.input_width / image_width, self.input_height / image_height)
+        resized_width = int(round(image_width * gain))
+        resized_height = int(round(image_height * gain))
+
+        if (resized_width, resized_height) != (image_width, image_height):
+            resized = cv2.resize(image, (resized_width, resized_height), interpolation=cv2.INTER_LINEAR)
+        else:
+            resized = image
+
+        pad_width = self.input_width - resized_width
+        pad_height = self.input_height - resized_height
+        pad_left = int(round(pad_width / 2 - 0.1))
+        pad_right = int(round(pad_width / 2 + 0.1))
+        pad_top = int(round(pad_height / 2 - 0.1))
+        pad_bottom = int(round(pad_height / 2 + 0.1))
+
+        bordered = cv2.copyMakeBorder(
+            resized,
+            pad_top,
+            pad_bottom,
+            pad_left,
+            pad_right,
+            cv2.BORDER_CONSTANT,
+            value=(114, 114, 114),
+        )
+        ratio_pad = ((gain, gain), (pad_left, pad_top))
+        return bordered, ratio_pad
+
+    def _preprocess(self, image):
+        letterboxed, ratio_pad = self._letterbox(image)
+        input_tensor = letterboxed[:, :, ::-1].transpose(2, 0, 1)
+        input_tensor = np.ascontiguousarray(input_tensor, dtype=np.float32) / 255.0
+        return input_tensor[None], letterboxed.shape[:2], ratio_pad
+
+    def detect(self, image, roi_coords=None):
+        roi_offset_x = 0
+        roi_offset_y = 0
+        inference_image = image
+
+        if roi_coords is not None:
+            x1, y1, x2, y2 = roi_coords
+            if x2 <= x1 or y2 <= y1:
+                return []
+            inference_image = image[y1:y2, x1:x2]
+            roi_offset_x = x1
+            roi_offset_y = y1
+
+        input_tensor, processed_shape, ratio_pad = self._preprocess(inference_image)
+        raw_prediction = self.compiled_model(input_tensor)[self.output_layer]
+        prediction = self.torch.from_numpy(raw_prediction)
+        batches = self.non_max_suppression(
+            prediction,
+            conf_thres=self.config.CONFIDENCE_THRESHOLD,
+            iou_thres=self.config.NMS_THRESHOLD,
+            max_det=self.config.MAX_DETECTIONS,
+            nc=len(self.config.CLASS_NAMES),
+        )
+        if not batches or batches[0].shape[0] == 0:
+            return []
+
+        boxes = batches[0].cpu()
+        boxes[:, :4] = self.scale_boxes(
+            processed_shape,
+            boxes[:, :4],
+            inference_image.shape[:2],
+            ratio_pad=ratio_pad,
+        )
+
+        image_height, image_width = inference_image.shape[:2]
+        detections = []
+        for box in boxes:
+            x1, y1, x2, y2, confidence, class_id = box[:6].tolist()
+            class_id = int(class_id)
+            annotation_type = (
+                self.config.CLASS_ANNOTATION_TYPES[class_id]
+                if 0 <= class_id < len(self.config.CLASS_ANNOTATION_TYPES)
+                else "bbox"
+            )
+            x1 = int(round(max(0, min(x1, image_width - 1))))
+            y1 = int(round(max(0, min(y1, image_height - 1))))
+            x2 = int(round(max(0, min(x2, image_width - 1))))
+            y2 = int(round(max(0, min(y2, image_height - 1))))
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            detections.append(
+                {
+                    "bbox": [x1 + roi_offset_x, y1 + roi_offset_y, x2 + roi_offset_x, y2 + roi_offset_y],
+                    "confidence": float(confidence),
+                    "class_id": class_id,
+                    "annotation_type": annotation_type,
+                    "polygon": None,
+                    "render_as": "bbox",
+                }
+            )
+
+        return detections
+
+
+class LaneDetector:
+    def __init__(self, config):
+        self.config = config
+        self.backend_name = self._resolve_backend(config.MODEL_BACKEND, config.MODEL_PATH)
+        if self.backend_name == "openvino":
+            self.backend = OpenVINOLaneDetector(config)
+        else:
+            self.backend = UltralyticsLaneDetector(config)
+
+        self.model_task = getattr(self.backend, "model_task", "detect")
+        self.model_class_names = getattr(self.backend, "model_class_names", [])
+        logging.info("Lane detector backend: %s", self.backend_name)
+
+    @staticmethod
+    def _resolve_backend(configured_backend, model_path):
+        if configured_backend == "auto":
+            return "openvino" if Path(model_path).suffix.lower() == ".xml" else "ultralytics"
+        return configured_backend
+
+    def detect(self, image, roi_coords=None):
+        return self.backend.detect(image, roi_coords)
 
 
 class AsyncLaneDetector:

@@ -119,11 +119,6 @@ assert hasattr(cv2, "getBuildInformation"), "cv2 loaded without OpenCV Python bi
 print(re.search(r'GStreamer:\s+(YES|NO)', cv2.getBuildInformation()).group(0))
 PY
 
-# Optional debugging
-ENV OPENCV_LOG_LEVEL=DEBUG \
-    GST_DEBUG=2 \
-    LIBVA_DRIVER_CANDIDATES=iHD,i965
-
 WORKDIR /app
 COPY . /app
 EXPOSE 8005
