@@ -1,0 +1,19 @@
+names:
+- center
+- curve
+- dashed
+- patrol
+- solid
+nc: 5
+colors:
+- [255, 0, 0]
+- [0, 255, 0]
+- [0, 0, 255]
+- [255, 255, 0]
+- [255, 0, 255]
+annotation_types:
+- polygon
+- polygon
+- polygon
+- bbox
+- polygon

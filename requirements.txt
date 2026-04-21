@@ -1,0 +1,7 @@
+numpy<2
+PyYAML
+flask
+flask-cors
+torch
+torchvision
+ultralytics
