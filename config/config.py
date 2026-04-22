@@ -13,6 +13,12 @@ _DEFAULT_CLASS_COLORS = (
     (255, 0, 255),
     (0, 255, 255),
 )
+_DEFAULT_VEHICLE_CLASS_COLORS = (
+    (0, 200, 255),
+    (0, 128, 255),
+    (0, 255, 128),
+    (255, 180, 0),
+)
 _DEFAULT_ANNOTATION_TYPE_BY_CLASS = {
     "center": "polygon",
     "curve": "polygon",
@@ -71,6 +77,18 @@ class Config:
             return str(openvino_path)
 
         return "./models/lane/lane_detector.pt"
+
+    @staticmethod
+    def _default_vehicle_model_path() -> str:
+        configured_path = os.getenv("VEHICLE_MODEL_PATH")
+        if configured_path:
+            return configured_path
+
+        openvino_path = Path("./models/vehicle/yolov8n_openvino/yolov8n.xml")
+        if openvino_path.is_file():
+            return str(openvino_path)
+
+        return "./models/vehicle/yolov8n.pt"
 
     @staticmethod
     def _normalize_annotation_types(
@@ -211,9 +229,40 @@ class Config:
     MODEL_CONFIG_PATH: str = os.getenv("MODEL_CONFIG_PATH", "./models/lane/configs.yaml")
     MODEL_DEVICE: str = os.getenv("MODEL_DEVICE", "cpu")
     MODEL_IMAGE_SIZE: int = int(os.getenv("MODEL_IMAGE_SIZE", "1280"))
-    CONFIDENCE_THRESHOLD: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.20"))
+    CONFIDENCE_THRESHOLD: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.05"))
     NMS_THRESHOLD: float = float(os.getenv("NMS_THRESHOLD", "0.45"))
     MAX_DETECTIONS: int = int(os.getenv("MAX_DETECTIONS", "100"))
+
+    VEHICLE_MODEL_BACKEND: str = os.getenv("VEHICLE_MODEL_BACKEND", "auto").strip().lower()
+    VEHICLE_MODEL_PATH: str = field(default_factory=lambda: Config._default_vehicle_model_path())
+    VEHICLE_MODEL_DEVICE: str = os.getenv("VEHICLE_MODEL_DEVICE", "cpu")
+    VEHICLE_MODEL_IMAGE_SIZE: int = int(os.getenv("VEHICLE_MODEL_IMAGE_SIZE", "640"))
+    VEHICLE_CONFIDENCE_THRESHOLD: float = float(os.getenv("VEHICLE_CONFIDENCE_THRESHOLD", "0.25"))
+    VEHICLE_NMS_THRESHOLD: float = float(os.getenv("VEHICLE_NMS_THRESHOLD", "0.45"))
+    VEHICLE_MAX_DETECTIONS: int = int(os.getenv("VEHICLE_MAX_DETECTIONS", "100"))
+    VEHICLE_CLASS_NAMES: tuple[str, ...] = field(
+        default_factory=lambda: Config._parse_csv_strings(
+            os.getenv("VEHICLE_CLASS_NAMES"),
+            ("car", "motorcycle", "bus", "truck"),
+        )
+    )
+    DRAW_VEHICLE_BOXES: bool = _parse_bool.__func__(os.getenv("DRAW_VEHICLE_BOXES"), True)
+    PERFORMANCE_HINT: str = os.getenv("PERFORMANCE_HINT", "LATENCY").strip().upper()
+    USE_MODEL_NORMALIZATION: bool = _parse_bool.__func__(os.getenv("USE_MODEL_NORMALIZATION"), True)
+    MODEL_MEAN: tuple[float, ...] = field(
+        default_factory=lambda: Config._parse_csv_floats(
+            os.getenv("MODEL_MEAN"),
+            (123.675, 116.28, 103.53),
+            3,
+        )
+    )
+    MODEL_STD: tuple[float, ...] = field(
+        default_factory=lambda: Config._parse_csv_floats(
+            os.getenv("MODEL_STD"),
+            (58.395, 57.12, 57.375),
+            3,
+        )
+    )
 
     DETECTION_ROI: tuple[float, float, float, float] = field(
         default_factory=lambda: Config._parse_csv_floats(
@@ -252,6 +301,7 @@ class Config:
     CLASS_COLORS: list[tuple[int, int, int]] = field(init=False)
     CLASS_ANNOTATION_TYPES: list[str] = field(init=False)
     CLASS_METADATA: dict[str, dict[str, object]] = field(init=False)
+    VEHICLE_CLASS_COLORS: list[tuple[int, int, int]] = field(init=False)
 
     def __post_init__(self):
         self.SKIP_FRAMES = max(1, self.SKIP_FRAMES)
@@ -265,12 +315,16 @@ class Config:
         self.VIDEO_FEED_JPEG_QUALITY = max(1, min(self.VIDEO_FEED_JPEG_QUALITY, 100))
         self.MODEL_BACKEND = self.MODEL_BACKEND.strip().lower()
         self.MODEL_PATH = str(self.MODEL_PATH).strip()
+        self.VEHICLE_MODEL_BACKEND = self.VEHICLE_MODEL_BACKEND.strip().lower()
+        self.VEHICLE_MODEL_PATH = str(self.VEHICLE_MODEL_PATH).strip()
         self.LANE_GUIDE_COVERAGE_RATIO = max(0.0, min(self.LANE_GUIDE_COVERAGE_RATIO, 1.0))
         self.LANE_GUIDE_FILL_ALPHA = max(0.0, min(self.LANE_GUIDE_FILL_ALPHA, 1.0))
         self.LIBVA_DRIVER_NAME = self.LIBVA_DRIVER_NAME.strip()
 
         if self.MODEL_BACKEND not in {"auto", "openvino", "ultralytics"}:
             raise ValueError("MODEL_BACKEND must be one of: auto, openvino, ultralytics")
+        if self.VEHICLE_MODEL_BACKEND not in {"auto", "openvino", "ultralytics"}:
+            raise ValueError("VEHICLE_MODEL_BACKEND must be one of: auto, openvino, ultralytics")
 
         libva_driver_candidates: list[str] = []
         if self.LIBVA_DRIVER_NAME:
@@ -283,6 +337,8 @@ class Config:
 
         if not Path(self.MODEL_PATH).is_file():
             raise FileNotFoundError(f"Model not found: {self.MODEL_PATH}")
+        if not Path(self.VEHICLE_MODEL_PATH).is_file():
+            raise FileNotFoundError(f"Vehicle model not found: {self.VEHICLE_MODEL_PATH}")
 
         x1, y1, x2, y2 = self.DETECTION_ROI
         if not (0.0 <= x1 < x2 <= 1.0 and 0.0 <= y1 < y2 <= 1.0):
@@ -307,3 +363,7 @@ class Config:
             }
             for index, class_name in enumerate(self.CLASS_NAMES)
         }
+        self.VEHICLE_CLASS_COLORS = [
+            _DEFAULT_VEHICLE_CLASS_COLORS[index % len(_DEFAULT_VEHICLE_CLASS_COLORS)]
+            for index in range(len(self.VEHICLE_CLASS_NAMES))
+        ]

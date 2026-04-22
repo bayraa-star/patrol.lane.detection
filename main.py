@@ -11,7 +11,15 @@ import numpy as np
 from config.config import Config
 from service.flask_server import frame_queue, run_flask
 from utils.capture import capture_thread_func
-from utils.lane_detector import AsyncLaneDetector, RTSPConnection, draw_detections, draw_roi, get_roi_coordinates
+from utils.lane_detector import (
+    AsyncLaneDetector,
+    AsyncVehicleDetector,
+    RTSPConnection,
+    draw_detections,
+    draw_object_detections,
+    draw_roi,
+    get_roi_coordinates,
+)
 
 
 def configure_logging(config):
@@ -134,6 +142,9 @@ def main():
             for class_name, annotation_type in zip(config.CLASS_NAMES, config.CLASS_ANNOTATION_TYPES)
         ),
     )
+    vehicle_detector = AsyncVehicleDetector(config)
+    vehicle_detector.start_processing()
+    logging.info("Vehicle detector classes: %s", ", ".join(config.VEHICLE_CLASS_NAMES))
 
     raw_frame_queue = Queue(maxsize=config.RAW_FRAME_QUEUE_SIZE)
     stop_event = threading.Event()
@@ -156,6 +167,8 @@ def main():
 
     last_detections = []
     last_result_ts = 0.0
+    last_vehicle_detections = []
+    last_vehicle_result_ts = 0.0
 
     try:
         while True:
@@ -185,6 +198,7 @@ def main():
 
             if frame_count % config.SKIP_FRAMES == 0:
                 detector.add_frame(frame.copy(), roi_coords)
+                vehicle_detector.add_frame(frame.copy(), roi_coords)
 
             latest_result = drain_latest_result(detector)
             if latest_result is not None:
@@ -197,6 +211,14 @@ def main():
                 if detections:
                     logging.info("Frame %s: found %s lane detection(s)", frame_count, len(detections))
 
+            latest_vehicle_result = drain_latest_result(vehicle_detector)
+            if latest_vehicle_result is not None:
+                _, vehicle_detections, _, _, vehicle_result_ts = latest_vehicle_result
+                last_vehicle_detections = vehicle_detections
+                last_vehicle_result_ts = vehicle_result_ts
+                if vehicle_detections:
+                    logging.info("Frame %s: found %s vehicle detection(s)", frame_count, len(vehicle_detections))
+
             processed_frame = frame.copy()
             if config.DRAW_ROI:
                 draw_roi(processed_frame, roi_coords, config.ROI_COLOR, config.BOX_THICKNESS)
@@ -205,6 +227,10 @@ def main():
                 detections_to_draw = last_detections
             else:
                 detections_to_draw = []
+            if time.time() - last_vehicle_result_ts <= config.RESULT_STALE_SECONDS:
+                vehicle_detections_to_draw = last_vehicle_detections
+            else:
+                vehicle_detections_to_draw = []
 
             if detections_to_draw:
                 draw_detections(
@@ -218,6 +244,16 @@ def main():
                     text_thickness=config.TEXT_THICKNESS,
                     lane_guide_coverage_ratio=config.LANE_GUIDE_COVERAGE_RATIO,
                     lane_guide_fill_alpha=config.LANE_GUIDE_FILL_ALPHA,
+                )
+            if config.DRAW_VEHICLE_BOXES and vehicle_detections_to_draw:
+                draw_object_detections(
+                    processed_frame,
+                    vehicle_detections_to_draw,
+                    list(config.VEHICLE_CLASS_NAMES),
+                    config.VEHICLE_CLASS_COLORS,
+                    line_thickness=config.BOX_THICKNESS,
+                    text_scale=config.TEXT_SCALE,
+                    text_thickness=config.TEXT_THICKNESS,
                 )
 
             enqueue_frame(processed_frame)
@@ -237,6 +273,7 @@ def main():
         stop_event.set()
         capture_thread.join()
         detector.stop()
+        vehicle_detector.stop()
         rtsp_conn.close()
         cv2.destroyAllWindows()
 

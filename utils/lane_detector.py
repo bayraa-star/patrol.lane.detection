@@ -10,6 +10,19 @@ import cv2
 import numpy as np
 
 
+COCO_CLASS_NAMES = (
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
+    "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+    "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
+    "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+    "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+    "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard",
+    "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase",
+    "scissors", "teddy bear", "hair drier", "toothbrush",
+)
+
+
 class FrameBuffer:
     def __init__(self, maxsize=1):
         self.queue = Queue(maxsize=maxsize)
@@ -67,6 +80,10 @@ def draw_roi(image, roi_coords, color, thickness):
 def _get_detection_center(detection):
     x1, y1, x2, y2 = detection["bbox"]
     return (x1 + x2) / 2.0, (y1 + y2) / 2.0
+
+
+def _get_class_name(class_names, class_id):
+    return class_names[class_id] if 0 <= class_id < len(class_names) else f"class_{class_id}"
 
 
 def _get_best_detection_by_class(detections, class_names, target_class_name):
@@ -136,7 +153,7 @@ def _get_nearest_lane_detections(detections, class_names, patrol_center_x):
 
     for detection in detections:
         class_id = detection.get("class_id", -1)
-        class_name = class_names[class_id] if 0 <= class_id < len(class_names) else f"class_{class_id}"
+        class_name = _get_class_name(class_names, class_id)
         if class_name == "patrol":
             continue
 
@@ -162,6 +179,115 @@ def _get_nearest_lane_detections(detections, class_names, patrol_center_x):
             nearest_distance_by_side[side] = distance
 
     return nearest_by_side
+
+
+def _get_sorted_right_side_detections(detections, class_names, patrol_center_x):
+    right_side_detections = []
+
+    for detection in detections:
+        class_id = detection.get("class_id", -1)
+        class_name = _get_class_name(class_names, class_id)
+        if class_name == "patrol":
+            continue
+
+        detection_center_x, _ = _get_detection_center(detection)
+        if detection_center_x <= patrol_center_x:
+            continue
+
+        right_side_detections.append(
+            (
+                abs(detection_center_x - patrol_center_x),
+                -float(detection.get("confidence", 0.0)),
+                detection,
+            )
+        )
+
+    right_side_detections.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in right_side_detections]
+
+
+def get_patrol_lane_info(detections, class_names):
+    patrol_detection = _get_best_detection_by_class(detections, class_names, "patrol")
+    if patrol_detection is None:
+        return None
+
+    patrol_center_x, _ = _get_detection_center(patrol_detection)
+    right_side_detections = _get_sorted_right_side_detections(detections, class_names, patrol_center_x)
+    if not right_side_detections:
+        return {
+            "lane_id": None,
+            "label": "Unknown",
+            "nearest_right_class": None,
+            "second_right_class": None,
+        }
+
+    nearest_right = right_side_detections[0]
+    nearest_right_name = _get_class_name(class_names, nearest_right.get("class_id", -1))
+
+    if nearest_right_name == "curve":
+        return {
+            "lane_id": 1,
+            "label": "Lane 1",
+            "nearest_right_class": nearest_right_name,
+            "second_right_class": None,
+        }
+
+    if nearest_right_name not in {"solid", "dashed"} or len(right_side_detections) < 2:
+        return {
+            "lane_id": None,
+            "label": "Unknown",
+            "nearest_right_class": nearest_right_name,
+            "second_right_class": None,
+        }
+
+    second_nearest_right = right_side_detections[1]
+    second_nearest_right_name = _get_class_name(class_names, second_nearest_right.get("class_id", -1))
+    if second_nearest_right_name != "curve":
+        return {
+            "lane_id": None,
+            "label": "Unknown",
+            "nearest_right_class": nearest_right_name,
+            "second_right_class": second_nearest_right_name,
+        }
+
+    return {
+        "lane_id": 2,
+        "label": "Lane 2",
+        "nearest_right_class": nearest_right_name,
+        "second_right_class": second_nearest_right_name,
+    }
+
+
+def draw_patrol_lane_status(image, lane_info, line_thickness=2, text_scale=0.8, text_thickness=2):
+    if not lane_info:
+        return
+
+    label = f"Patrol Moving: {lane_info['label']}"
+    (label_width, label_height), baseline = cv2.getTextSize(
+        label,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        text_scale,
+        text_thickness,
+    )
+    x1 = 16
+    y1 = 16
+    x2 = x1 + label_width + 16
+    y2 = y1 + label_height + baseline + 16
+
+    overlay = image.copy()
+    cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 220, 255), thickness=-1)
+    cv2.addWeighted(overlay, 0.25, image, 0.75, 0.0, image)
+    cv2.rectangle(image, (x1, y1), (x2, y2), (0, 220, 255), max(2, line_thickness), cv2.LINE_AA)
+    cv2.putText(
+        image,
+        label,
+        (x1 + 8, y2 - baseline - 8),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        text_scale,
+        (0, 0, 0),
+        text_thickness,
+        cv2.LINE_AA,
+    )
 
 
 def _get_lane_guide_segment(image_shape, detection_bbox, patrol_center_x, coverage_ratio):
@@ -256,7 +382,7 @@ def draw_detections(
         render_as = detection.get("render_as", "bbox")
 
         color = class_colors[class_id % len(class_colors)] if class_colors else (0, 255, 0)
-        class_name = class_names[class_id] if 0 <= class_id < len(class_names) else f"class_{class_id}"
+        class_name = _get_class_name(class_names, class_id)
         label = f"{class_name} {confidence:.2f}"
         if roi_coords is not None and is_bbox_in_roi(detection["bbox"], roi_coords):
             label += " [ROI]"
@@ -304,6 +430,65 @@ def draw_detections(
         lane_guide_coverage_ratio,
         lane_guide_fill_alpha,
     )
+    draw_patrol_lane_status(
+        image,
+        get_patrol_lane_info(detections, class_names),
+        line_thickness=line_thickness,
+        text_scale=max(0.7, text_scale + 0.1),
+        text_thickness=text_thickness,
+    )
+
+
+def draw_object_detections(
+    image,
+    detections,
+    class_names,
+    class_colors,
+    line_thickness=2,
+    text_scale=0.6,
+    text_thickness=2,
+):
+    for detection in detections:
+        x1, y1, x2, y2 = detection["bbox"]
+        class_id = detection["class_id"]
+        confidence = detection["confidence"]
+
+        color = class_colors[class_id % len(class_colors)] if class_colors else (0, 255, 255)
+        class_name = _get_class_name(class_names, class_id)
+        label = f"{class_name} {confidence:.2f}"
+
+        cv2.rectangle(image, (x1, y1), (x2, y2), color, line_thickness, cv2.LINE_AA)
+        (label_width, label_height), baseline = cv2.getTextSize(
+            label,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            text_scale,
+            text_thickness,
+        )
+        top = max(0, y1 - label_height - baseline - 6)
+        cv2.rectangle(
+            image,
+            (x1, top),
+            (x1 + label_width + 8, y1),
+            color,
+            thickness=-1,
+        )
+        cv2.putText(
+            image,
+            label,
+            (x1 + 4, y1 - baseline - 3),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            text_scale,
+            (0, 0, 0),
+            text_thickness,
+            cv2.LINE_AA,
+        )
+
+
+def _normalize_openvino_device(device_name):
+    if not device_name:
+        return "CPU"
+    normalized = str(device_name).strip()
+    return "CPU" if normalized.lower() == "cpu" else normalized
 
 
 class RTSPConnection:
@@ -832,6 +1017,250 @@ class OpenVINOLaneDetector:
         return detections
 
 
+class OpenVINOVehicleDetector:
+    def __init__(self, config):
+        import openvino as ov
+        import torch
+        from ultralytics.utils.nms import non_max_suppression
+        from ultralytics.utils.ops import scale_boxes
+
+        self.config = config
+        self.ov = ov
+        self.torch = torch
+        self.non_max_suppression = non_max_suppression
+        self.scale_boxes = scale_boxes
+        self.model_task = "detect"
+        self.model_class_names = list(config.VEHICLE_CLASS_NAMES)
+        self.available_class_names = list(COCO_CLASS_NAMES)
+        self.target_class_ids = {
+            class_id
+            for class_id, class_name in enumerate(self.available_class_names)
+            if class_name in set(config.VEHICLE_CLASS_NAMES)
+        }
+        self.display_class_id_by_name = {
+            class_name: index
+            for index, class_name in enumerate(config.VEHICLE_CLASS_NAMES)
+        }
+
+        self.core = ov.Core()
+        self.device_name = self._normalize_device(config.VEHICLE_MODEL_DEVICE)
+        self.model = self.core.read_model(config.VEHICLE_MODEL_PATH)
+        self.compiled_model = self.core.compile_model(self.model, self.device_name)
+        self.input_layer = self.compiled_model.input(0)
+        self.output_layer = self.compiled_model.output(0)
+        self.input_shape = tuple(int(dimension) for dimension in self.input_layer.shape)
+        if len(self.input_shape) != 4:
+            raise ValueError(f"Expected OpenVINO model input shape [N,C,H,W], got {self.input_shape}")
+        self.input_height = self.input_shape[2]
+        self.input_width = self.input_shape[3]
+
+        logging.info(
+            "Loaded OpenVINO vehicle detector from %s on device %s with input shape %s",
+            config.VEHICLE_MODEL_PATH,
+            self.device_name,
+            self.input_shape,
+        )
+
+    @staticmethod
+    def _normalize_device(device_name):
+        return _normalize_openvino_device(device_name)
+
+    def _letterbox(self, image):
+        image_height, image_width = image.shape[:2]
+        gain = min(self.input_width / image_width, self.input_height / image_height)
+        resized_width = int(round(image_width * gain))
+        resized_height = int(round(image_height * gain))
+
+        if (resized_width, resized_height) != (image_width, image_height):
+            resized = cv2.resize(image, (resized_width, resized_height), interpolation=cv2.INTER_LINEAR)
+        else:
+            resized = image
+
+        pad_width = self.input_width - resized_width
+        pad_height = self.input_height - resized_height
+        pad_left = int(round(pad_width / 2 - 0.1))
+        pad_right = int(round(pad_width / 2 + 0.1))
+        pad_top = int(round(pad_height / 2 - 0.1))
+        pad_bottom = int(round(pad_height / 2 + 0.1))
+
+        bordered = cv2.copyMakeBorder(
+            resized,
+            pad_top,
+            pad_bottom,
+            pad_left,
+            pad_right,
+            cv2.BORDER_CONSTANT,
+            value=(114, 114, 114),
+        )
+        ratio_pad = ((gain, gain), (pad_left, pad_top))
+        return bordered, ratio_pad
+
+    def _preprocess(self, image):
+        letterboxed, ratio_pad = self._letterbox(image)
+        input_tensor = letterboxed[:, :, ::-1].transpose(2, 0, 1)
+        input_tensor = np.ascontiguousarray(input_tensor, dtype=np.float32) / 255.0
+        return input_tensor[None], letterboxed.shape[:2], ratio_pad
+
+    def detect(self, image, roi_coords=None):
+        roi_offset_x = 0
+        roi_offset_y = 0
+        inference_image = image
+
+        if roi_coords is not None:
+            x1, y1, x2, y2 = roi_coords
+            if x2 <= x1 or y2 <= y1:
+                return []
+            inference_image = image[y1:y2, x1:x2]
+            roi_offset_x = x1
+            roi_offset_y = y1
+
+        input_tensor, processed_shape, ratio_pad = self._preprocess(inference_image)
+        raw_prediction = self.compiled_model(input_tensor)[self.output_layer]
+        prediction = self.torch.from_numpy(raw_prediction)
+        batches = self.non_max_suppression(
+            prediction,
+            conf_thres=self.config.VEHICLE_CONFIDENCE_THRESHOLD,
+            iou_thres=self.config.VEHICLE_NMS_THRESHOLD,
+            max_det=self.config.VEHICLE_MAX_DETECTIONS,
+            nc=len(self.available_class_names),
+        )
+        if not batches or batches[0].shape[0] == 0:
+            return []
+
+        boxes = batches[0].cpu()
+        boxes[:, :4] = self.scale_boxes(
+            processed_shape,
+            boxes[:, :4],
+            inference_image.shape[:2],
+            ratio_pad=ratio_pad,
+        )
+
+        image_height, image_width = inference_image.shape[:2]
+        detections = []
+        for box in boxes:
+            x1, y1, x2, y2, confidence, class_id = box[:6].tolist()
+            source_class_id = int(class_id)
+            if source_class_id not in self.target_class_ids:
+                continue
+
+            source_class_name = self.available_class_names[source_class_id]
+            display_class_id = self.display_class_id_by_name[source_class_name]
+            x1 = int(round(max(0, min(x1, image_width - 1))))
+            y1 = int(round(max(0, min(y1, image_height - 1))))
+            x2 = int(round(max(0, min(x2, image_width - 1))))
+            y2 = int(round(max(0, min(y2, image_height - 1))))
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            detections.append(
+                {
+                    "bbox": [x1 + roi_offset_x, y1 + roi_offset_y, x2 + roi_offset_x, y2 + roi_offset_y],
+                    "confidence": float(confidence),
+                    "class_id": display_class_id,
+                }
+            )
+
+        return detections
+
+
+class UltralyticsVehicleDetector:
+    def __init__(self, config):
+        from ultralytics import YOLO
+
+        self.config = config
+        self.model = YOLO(config.VEHICLE_MODEL_PATH)
+        self.model_task = getattr(self.model, "task", None) or getattr(self.model.model, "task", None) or "detect"
+        raw_model_names = getattr(self.model, "names", None) or getattr(self.model.model, "names", None) or {}
+        if isinstance(raw_model_names, dict):
+            self.available_class_names = [str(raw_model_names[index]) for index in sorted(raw_model_names)]
+        elif isinstance(raw_model_names, list):
+            self.available_class_names = [str(name) for name in raw_model_names]
+        else:
+            self.available_class_names = []
+
+        self.target_class_names = set(config.VEHICLE_CLASS_NAMES)
+        self.display_class_id_by_name = {
+            class_name: index
+            for index, class_name in enumerate(config.VEHICLE_CLASS_NAMES)
+        }
+        self.model_class_names = list(config.VEHICLE_CLASS_NAMES)
+
+    def detect(self, image, roi_coords=None):
+        roi_offset_x = 0
+        roi_offset_y = 0
+        inference_image = image
+
+        if roi_coords is not None:
+            x1, y1, x2, y2 = roi_coords
+            if x2 <= x1 or y2 <= y1:
+                return []
+            inference_image = image[y1:y2, x1:x2]
+            roi_offset_x = x1
+            roi_offset_y = y1
+
+        results = self.model.predict(
+            source=inference_image,
+            imgsz=self.config.VEHICLE_MODEL_IMAGE_SIZE,
+            conf=self.config.VEHICLE_CONFIDENCE_THRESHOLD,
+            iou=self.config.VEHICLE_NMS_THRESHOLD,
+            device=self.config.VEHICLE_MODEL_DEVICE,
+            max_det=self.config.VEHICLE_MAX_DETECTIONS,
+            verbose=False,
+        )
+        if not results:
+            return []
+
+        boxes = results[0].boxes
+        if boxes is None or len(boxes) == 0:
+            return []
+
+        detections = []
+        boxes = boxes.cpu()
+
+        for box in boxes:
+            source_class_id = int(box.cls[0].item()) if box.cls is not None else -1
+            if not (0 <= source_class_id < len(self.available_class_names)):
+                continue
+
+            source_class_name = self.available_class_names[source_class_id]
+            if source_class_name not in self.target_class_names:
+                continue
+
+            x1, y1, x2, y2 = [int(value) for value in box.xyxy[0].tolist()]
+            detections.append(
+                {
+                    "bbox": [x1 + roi_offset_x, y1 + roi_offset_y, x2 + roi_offset_x, y2 + roi_offset_y],
+                    "confidence": float(box.conf[0].item()) if box.conf is not None else 0.0,
+                    "class_id": self.display_class_id_by_name[source_class_name],
+                }
+            )
+
+        return detections
+
+
+class VehicleDetector:
+    def __init__(self, config):
+        self.config = config
+        self.backend_name = self._resolve_backend(config.VEHICLE_MODEL_BACKEND, config.VEHICLE_MODEL_PATH)
+        if self.backend_name == "openvino":
+            self.backend = OpenVINOVehicleDetector(config)
+        else:
+            self.backend = UltralyticsVehicleDetector(config)
+
+        self.model_task = getattr(self.backend, "model_task", "detect")
+        self.model_class_names = getattr(self.backend, "model_class_names", [])
+        logging.info("Vehicle detector backend: %s", self.backend_name)
+
+    @staticmethod
+    def _resolve_backend(configured_backend, model_path):
+        if configured_backend == "auto":
+            return "openvino" if Path(model_path).suffix.lower() == ".xml" else "ultralytics"
+        return configured_backend
+
+    def detect(self, image, roi_coords=None):
+        return self.backend.detect(image, roi_coords)
+
+
 class LaneDetector:
     def __init__(self, config):
         self.config = config
@@ -886,6 +1315,50 @@ class AsyncLaneDetector:
                 self.result_buffer.put((frame.copy(), detections, roi_coords, process_time, time.time()))
             except Exception:
                 logging.exception("Lane detection failed")
+
+    def add_frame(self, frame, roi_coords):
+        self.frame_buffer.put((frame, roi_coords))
+
+    def get_result(self):
+        return self.result_buffer.get()
+
+    def stop(self):
+        self.processing = False
+        if self.detection_thread:
+            self.detection_thread.join()
+
+
+class AsyncVehicleDetector:
+    def __init__(self, config):
+        self.config = config
+        self.frame_buffer = FrameBuffer(maxsize=config.DETECTOR_INPUT_QUEUE_SIZE)
+        self.result_buffer = FrameBuffer(maxsize=config.DETECTOR_RESULT_QUEUE_SIZE)
+        self.processing = False
+        self.detection_thread = None
+        self.detector = VehicleDetector(config)
+
+    def start_processing(self):
+        if self.processing:
+            return
+        self.processing = True
+        self.detection_thread = threading.Thread(target=self._process_frames, daemon=True)
+        self.detection_thread.start()
+
+    def _process_frames(self):
+        while self.processing:
+            item = self.frame_buffer.get(timeout=self.config.DETECTOR_POLL_TIMEOUT_S)
+            if item is None:
+                continue
+
+            frame, roi_coords = item
+            start_time = time.time()
+
+            try:
+                detections = self.detector.detect(frame, roi_coords)
+                process_time = time.time() - start_time
+                self.result_buffer.put((frame.copy(), detections, roi_coords, process_time, time.time()))
+            except Exception:
+                logging.exception("Vehicle detection failed")
 
     def add_frame(self, frame, roi_coords):
         self.frame_buffer.put((frame, roi_coords))
