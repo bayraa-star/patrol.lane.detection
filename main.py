@@ -14,6 +14,7 @@ from utils.capture import capture_thread_func
 from utils.lane_detector import (
     AsyncLaneDetector,
     AsyncVehicleDetector,
+    ByteTrackVehicleTracker,
     RTSPConnection,
     draw_detections,
     draw_object_detections,
@@ -145,6 +146,15 @@ def main():
     vehicle_detector = AsyncVehicleDetector(config)
     vehicle_detector.start_processing()
     logging.info("Vehicle detector classes: %s", ", ".join(config.VEHICLE_CLASS_NAMES))
+    vehicle_tracker = ByteTrackVehicleTracker(config) if config.ENABLE_VEHICLE_TRACKING else None
+    if vehicle_tracker is not None:
+        logging.info(
+            "Vehicle tracking enabled: high=%.2f low=%.2f match=%.2f max_lost=%s",
+            config.BYTE_TRACK_HIGH_THRESHOLD,
+            config.BYTE_TRACK_LOW_THRESHOLD,
+            config.BYTE_TRACK_MATCH_THRESHOLD,
+            config.BYTE_TRACK_MAX_LOST_FRAMES,
+        )
 
     raw_frame_queue = Queue(maxsize=config.RAW_FRAME_QUEUE_SIZE)
     stop_event = threading.Event()
@@ -214,6 +224,8 @@ def main():
             latest_vehicle_result = drain_latest_result(vehicle_detector)
             if latest_vehicle_result is not None:
                 _, vehicle_detections, _, _, vehicle_result_ts = latest_vehicle_result
+                if vehicle_tracker is not None:
+                    vehicle_detections = vehicle_tracker.update(vehicle_detections)
                 last_vehicle_detections = vehicle_detections
                 last_vehicle_result_ts = vehicle_result_ts
                 if vehicle_detections:
@@ -261,7 +273,7 @@ def main():
             elapsed = time.time() - last_loop_time
             target_delay = fps_limit_delay - elapsed
             if target_delay > 0:
-                time.sleep(min(target_delay, 0.005))
+                time.sleep(target_delay)
             last_loop_time = time.time()
 
     except KeyboardInterrupt:

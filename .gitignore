@@ -15,6 +15,7 @@ dist/
 .eggs/
 *.egg-info/
 pip-wheel-metadata/
+lane_detector.tar
 
 # Test and tooling caches
 .pytest_cache/

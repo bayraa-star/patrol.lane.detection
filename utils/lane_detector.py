@@ -82,6 +82,25 @@ def _get_detection_center(detection):
     return (x1 + x2) / 2.0, (y1 + y2) / 2.0
 
 
+def _bbox_iou(first_bbox, second_bbox):
+    ax1, ay1, ax2, ay2 = first_bbox
+    bx1, by1, bx2, by2 = second_bbox
+    intersection_x1 = max(ax1, bx1)
+    intersection_y1 = max(ay1, by1)
+    intersection_x2 = min(ax2, bx2)
+    intersection_y2 = min(ay2, by2)
+    intersection_width = max(0, intersection_x2 - intersection_x1)
+    intersection_height = max(0, intersection_y2 - intersection_y1)
+    intersection_area = intersection_width * intersection_height
+
+    first_area = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+    second_area = max(0, bx2 - bx1) * max(0, by2 - by1)
+    union_area = first_area + second_area - intersection_area
+    if union_area <= 0:
+        return 0.0
+    return intersection_area / union_area
+
+
 def _get_class_name(class_names, class_id):
     return class_names[class_id] if 0 <= class_id < len(class_names) else f"class_{class_id}"
 
@@ -455,7 +474,11 @@ def draw_object_detections(
 
         color = class_colors[class_id % len(class_colors)] if class_colors else (0, 255, 255)
         class_name = _get_class_name(class_names, class_id)
-        label = f"{class_name} {confidence:.2f}"
+        track_id = detection.get("track_id")
+        if track_id is None:
+            label = f"{class_name} {confidence:.2f}"
+        else:
+            label = f"{class_name} #{track_id} {confidence:.2f}"
 
         cv2.rectangle(image, (x1, y1), (x2, y2), color, line_thickness, cv2.LINE_AA)
         (label_width, label_height), baseline = cv2.getTextSize(
@@ -489,6 +512,23 @@ def _normalize_openvino_device(device_name):
         return "CPU"
     normalized = str(device_name).strip()
     return "CPU" if normalized.lower() == "cpu" else normalized
+
+
+def _openvino_compile_config(config):
+    compile_config = {}
+    performance_hint = getattr(config, "PERFORMANCE_HINT", "").strip().upper()
+    if performance_hint:
+        compile_config["PERFORMANCE_HINT"] = performance_hint
+
+    num_streams = str(getattr(config, "OPENVINO_NUM_STREAMS", "")).strip()
+    if num_streams:
+        compile_config["NUM_STREAMS"] = num_streams
+
+    inference_threads = int(getattr(config, "OPENVINO_INFERENCE_NUM_THREADS", 0))
+    if inference_threads > 0:
+        compile_config["INFERENCE_NUM_THREADS"] = inference_threads
+
+    return compile_config
 
 
 class RTSPConnection:
@@ -583,13 +623,13 @@ class RTSPConnection:
             if decoder_name == "vah264dec":
                 decode_stage = (
                     "vah264dec ! "
-                    "vapostproc ! video/x-raw,format=BGRx ! "
+                    "vapostproc ! video/x-raw,format=NV12 ! "
                     "videoconvert n-threads=1 ! video/x-raw,format=BGR"
                 )
             else:
                 decode_stage = (
                     f"{decoder_name} low-latency=true ! "
-                    "video/x-raw,format=BGRx ! "
+                    "vaapipostproc ! video/x-raw,format=NV12 ! "
                     "videoconvert n-threads=1 ! video/x-raw,format=BGR"
                 )
         elif decoder_name == "decodebin":
@@ -602,7 +642,6 @@ class RTSPConnection:
             f'drop-on-latency={drop_on_latency} name=src '
             "src. ! queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 "
             "! application/x-rtp,media=video,encoding-name=H264 "
-            f"! rtpjitterbuffer latency={latency} "
             "! rtph264depay ! h264parse config-interval=-1 disable-passthrough=true "
             f"! {decode_stage} "
             "! queue max-size-buffers=4 max-size-bytes=0 max-size-time=0 "
@@ -889,11 +928,15 @@ class OpenVINOLaneDetector:
         self.scale_boxes = scale_boxes
         self.model_task = "detect"
         self.model_class_names = list(config.CLASS_NAMES)
+        torch_threads = int(getattr(config, "TORCH_NUM_THREADS", 0))
+        if torch_threads > 0:
+            self.torch.set_num_threads(torch_threads)
 
         self.core = ov.Core()
         self.device_name = self._normalize_device(config.MODEL_DEVICE)
         self.model = self.core.read_model(config.MODEL_PATH)
-        self.compiled_model = self.core.compile_model(self.model, self.device_name)
+        self.compile_config = _openvino_compile_config(config)
+        self.compiled_model = self.core.compile_model(self.model, self.device_name, self.compile_config)
         self.input_layer = self.compiled_model.input(0)
         self.output_layer = self.compiled_model.output(0)
         self.input_shape = tuple(int(dimension) for dimension in self.input_layer.shape)
@@ -903,10 +946,11 @@ class OpenVINOLaneDetector:
         self.input_width = self.input_shape[3]
 
         logging.info(
-            "Loaded OpenVINO lane detector from %s on device %s with input shape %s",
+            "Loaded OpenVINO lane detector from %s on device %s with input shape %s and config %s",
             config.MODEL_PATH,
             self.device_name,
             self.input_shape,
+            self.compile_config,
         )
 
     @staticmethod
@@ -1031,6 +1075,9 @@ class OpenVINOVehicleDetector:
         self.scale_boxes = scale_boxes
         self.model_task = "detect"
         self.model_class_names = list(config.VEHICLE_CLASS_NAMES)
+        torch_threads = int(getattr(config, "TORCH_NUM_THREADS", 0))
+        if torch_threads > 0:
+            self.torch.set_num_threads(torch_threads)
         self.available_class_names = list(COCO_CLASS_NAMES)
         self.target_class_ids = {
             class_id
@@ -1045,7 +1092,8 @@ class OpenVINOVehicleDetector:
         self.core = ov.Core()
         self.device_name = self._normalize_device(config.VEHICLE_MODEL_DEVICE)
         self.model = self.core.read_model(config.VEHICLE_MODEL_PATH)
-        self.compiled_model = self.core.compile_model(self.model, self.device_name)
+        self.compile_config = _openvino_compile_config(config)
+        self.compiled_model = self.core.compile_model(self.model, self.device_name, self.compile_config)
         self.input_layer = self.compiled_model.input(0)
         self.output_layer = self.compiled_model.output(0)
         self.input_shape = tuple(int(dimension) for dimension in self.input_layer.shape)
@@ -1055,10 +1103,11 @@ class OpenVINOVehicleDetector:
         self.input_width = self.input_shape[3]
 
         logging.info(
-            "Loaded OpenVINO vehicle detector from %s on device %s with input shape %s",
+            "Loaded OpenVINO vehicle detector from %s on device %s with input shape %s and config %s",
             config.VEHICLE_MODEL_PATH,
             self.device_name,
             self.input_shape,
+            self.compile_config,
         )
 
     @staticmethod
@@ -1259,6 +1308,122 @@ class VehicleDetector:
 
     def detect(self, image, roi_coords=None):
         return self.backend.detect(image, roi_coords)
+
+
+class ByteTrackVehicleTracker:
+    def __init__(self, config):
+        self.high_threshold = float(getattr(config, "BYTE_TRACK_HIGH_THRESHOLD", 0.45))
+        self.low_threshold = float(getattr(config, "BYTE_TRACK_LOW_THRESHOLD", 0.10))
+        self.match_threshold = float(getattr(config, "BYTE_TRACK_MATCH_THRESHOLD", 0.30))
+        self.max_lost_frames = int(getattr(config, "BYTE_TRACK_MAX_LOST_FRAMES", 30))
+        self.next_track_id = 1
+        self.tracks = []
+
+    def update(self, detections):
+        high_detections = [
+            dict(detection)
+            for detection in detections
+            if detection.get("confidence", 0.0) >= self.high_threshold
+        ]
+        low_detections = [
+            dict(detection)
+            for detection in detections
+            if self.low_threshold <= detection.get("confidence", 0.0) < self.high_threshold
+        ]
+
+        for track in self.tracks:
+            track["lost_frames"] += 1
+            track["updated"] = False
+
+        unmatched_tracks = list(range(len(self.tracks)))
+        unmatched_high = list(range(len(high_detections)))
+        _, unmatched_tracks, unmatched_high = self._match(
+            unmatched_tracks,
+            high_detections,
+            unmatched_high,
+        )
+
+        unmatched_low = list(range(len(low_detections)))
+        _, unmatched_tracks, _ = self._match(unmatched_tracks, low_detections, unmatched_low)
+
+        for detection_index in unmatched_high:
+            self._start_track(high_detections[detection_index])
+
+        self.tracks = [
+            track
+            for track in self.tracks
+            if track["lost_frames"] <= self.max_lost_frames
+        ]
+
+        return [
+            self._tracked_detection(track)
+            for track in self.tracks
+            if track["updated"] or track["lost_frames"] <= 1
+        ]
+
+    def _match(self, track_indices, detections, detection_indices):
+        pairs = []
+        for track_index in track_indices:
+            track = self.tracks[track_index]
+            for detection_index in detection_indices:
+                detection = detections[detection_index]
+                if detection.get("class_id") != track["class_id"]:
+                    continue
+                iou = _bbox_iou(track["bbox"], detection["bbox"])
+                if iou >= self.match_threshold:
+                    pairs.append((iou, track_index, detection_index))
+
+        pairs.sort(reverse=True, key=lambda item: item[0])
+        matched_track_indices = set()
+        matched_detection_indices = set()
+        for _, track_index, detection_index in pairs:
+            if track_index in matched_track_indices or detection_index in matched_detection_indices:
+                continue
+            self._update_track(self.tracks[track_index], detections[detection_index])
+            matched_track_indices.add(track_index)
+            matched_detection_indices.add(detection_index)
+
+        unmatched_tracks = [
+            track_index
+            for track_index in track_indices
+            if track_index not in matched_track_indices
+        ]
+        unmatched_detections = [
+            detection_index
+            for detection_index in detection_indices
+            if detection_index not in matched_detection_indices
+        ]
+        return matched_track_indices, unmatched_tracks, unmatched_detections
+
+    def _start_track(self, detection):
+        track = {
+            "track_id": self.next_track_id,
+            "bbox": detection["bbox"],
+            "confidence": detection.get("confidence", 0.0),
+            "class_id": detection.get("class_id", -1),
+            "lost_frames": 0,
+            "updated": True,
+        }
+        self.next_track_id += 1
+        self.tracks.append(track)
+
+    @staticmethod
+    def _update_track(track, detection):
+        track["bbox"] = detection["bbox"]
+        track["confidence"] = detection.get("confidence", track["confidence"])
+        track["class_id"] = detection.get("class_id", track["class_id"])
+        track["lost_frames"] = 0
+        track["updated"] = True
+
+    @staticmethod
+    def _tracked_detection(track):
+        return {
+            "bbox": list(track["bbox"]),
+            "confidence": float(track["confidence"]),
+            "class_id": int(track["class_id"]),
+            "track_id": int(track["track_id"]),
+            "lost_frames": int(track["lost_frames"]),
+        }
 
 
 class LaneDetector:

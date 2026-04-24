@@ -24,4 +24,4 @@ config/__pychache__
 models/__pychache__
 services/__pychache__
 utils/__pychache__
-
+models/license_plate_model/

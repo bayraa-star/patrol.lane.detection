@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
+import json
 import os
 
 import yaml
@@ -51,6 +52,17 @@ class Config:
     def _parse_csv_strings(value: str, default: tuple[str, ...]) -> tuple[str, ...]:
         if not value:
             return default
+        stripped_value = str(value).strip()
+        if not stripped_value:
+            return default
+        if stripped_value.startswith("[") and stripped_value.endswith("]"):
+            try:
+                parsed_value = json.loads(stripped_value)
+            except json.JSONDecodeError:
+                parsed_value = None
+            if isinstance(parsed_value, list):
+                parts = tuple(str(item).strip() for item in parsed_value if str(item).strip())
+                return parts or default
         parts = tuple(item.strip() for item in value.split(",") if item.strip())
         return parts or default
 
@@ -247,7 +259,15 @@ class Config:
         )
     )
     DRAW_VEHICLE_BOXES: bool = _parse_bool.__func__(os.getenv("DRAW_VEHICLE_BOXES"), True)
+    ENABLE_VEHICLE_TRACKING: bool = _parse_bool.__func__(os.getenv("ENABLE_VEHICLE_TRACKING"), True)
+    BYTE_TRACK_HIGH_THRESHOLD: float = float(os.getenv("BYTE_TRACK_HIGH_THRESHOLD", "0.45"))
+    BYTE_TRACK_LOW_THRESHOLD: float = float(os.getenv("BYTE_TRACK_LOW_THRESHOLD", "0.10"))
+    BYTE_TRACK_MATCH_THRESHOLD: float = float(os.getenv("BYTE_TRACK_MATCH_THRESHOLD", "0.30"))
+    BYTE_TRACK_MAX_LOST_FRAMES: int = int(os.getenv("BYTE_TRACK_MAX_LOST_FRAMES", "30"))
     PERFORMANCE_HINT: str = os.getenv("PERFORMANCE_HINT", "LATENCY").strip().upper()
+    OPENVINO_NUM_STREAMS: str = os.getenv("OPENVINO_NUM_STREAMS", "1").strip()
+    OPENVINO_INFERENCE_NUM_THREADS: int = int(os.getenv("OPENVINO_INFERENCE_NUM_THREADS", "0"))
+    TORCH_NUM_THREADS: int = int(os.getenv("TORCH_NUM_THREADS", "0"))
     USE_MODEL_NORMALIZATION: bool = _parse_bool.__func__(os.getenv("USE_MODEL_NORMALIZATION"), True)
     MODEL_MEAN: tuple[float, ...] = field(
         default_factory=lambda: Config._parse_csv_floats(
@@ -320,6 +340,10 @@ class Config:
         self.LANE_GUIDE_COVERAGE_RATIO = max(0.0, min(self.LANE_GUIDE_COVERAGE_RATIO, 1.0))
         self.LANE_GUIDE_FILL_ALPHA = max(0.0, min(self.LANE_GUIDE_FILL_ALPHA, 1.0))
         self.LIBVA_DRIVER_NAME = self.LIBVA_DRIVER_NAME.strip()
+        self.BYTE_TRACK_HIGH_THRESHOLD = max(0.0, min(self.BYTE_TRACK_HIGH_THRESHOLD, 1.0))
+        self.BYTE_TRACK_LOW_THRESHOLD = max(0.0, min(self.BYTE_TRACK_LOW_THRESHOLD, self.BYTE_TRACK_HIGH_THRESHOLD))
+        self.BYTE_TRACK_MATCH_THRESHOLD = max(0.0, min(self.BYTE_TRACK_MATCH_THRESHOLD, 1.0))
+        self.BYTE_TRACK_MAX_LOST_FRAMES = max(1, self.BYTE_TRACK_MAX_LOST_FRAMES)
 
         if self.MODEL_BACKEND not in {"auto", "openvino", "ultralytics"}:
             raise ValueError("MODEL_BACKEND must be one of: auto, openvino, ultralytics")
