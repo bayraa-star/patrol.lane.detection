@@ -1,15 +1,10 @@
-sudo docker run --rm -it \
-  --name lane-detection-test \
+sudo docker run --rm -d \
+  --name lane-detection-demo \
   --network host \
-  --device /dev/dri/renderD128 \
-  -e XDG_RUNTIME_DIR=/tmp \
   -e STREAM_PORT=8016 \
-  -e RTSP_URL='rtsp://192.168.1.117:8554/speed2' \
-  -e INTEL_DRM_DEVICE=/dev/dri/renderD128 \
-  -e LIBVA_DRIVER_NAME=iHD \
-  -e LIBVA_DRIVER_CANDIDATES=iHD \
-  -e PREFER_INTEL_HW_DECODE=true \
-  -e ALLOW_CPU_FALLBACK=false \
+  -e RTSP_URL='rtsp://localhost:8554/speed2' \
+  -e PREFER_INTEL_HW_DECODE=false \
+  -e ALLOW_CPU_FALLBACK=true \
   -e VIDEO_FEED_JPEG_QUALITY=75 \
   -e SKIP_FRAMES=2 \
   bayraa/lane_detector:latest
